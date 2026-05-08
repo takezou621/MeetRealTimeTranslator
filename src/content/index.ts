@@ -184,10 +184,8 @@ async function handleRuntimeMessage(message: { type: string; [key: string]: unkn
       if (!injectAlive) {
         log("inject.js NOT detected — page needs reload");
         updateOverlayStatus("error", "Meetページをリロードしてください（F5）");
-        chrome.runtime.sendMessage({
-          type: "TRANSLATION_STATUS", status: "error",
-          error: "Meetページをリロードしてください（F5）",
-        });
+        // Clean up any resources that may have been allocated (offscreen etc.)
+        chrome.runtime.sendMessage({ type: "STOP_TRANSLATION" });
         throw new Error("inject.js not detected — reload Meet page");
       }
       log("inject.js detected, audioGraphReady:", audioGraphReady);

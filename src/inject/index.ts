@@ -1,7 +1,6 @@
 // inject.js — Runs in MAIN world at document_start (before Meet loads)
 // NO IMPORTS — must be fully self-contained
 // NO FETCH CALLS — SDP exchange is routed through content script → background
-//   to avoid Meet's Content Security Policy restrictions
 
 const OPENAI_API_BASE = "https://api.openai.com/v1/realtime/translations";
 
@@ -12,14 +11,15 @@ let audioCtx: AudioContext | null = null;
 let micDestination: MediaStreamAudioDestinationNode | null = null;
 let micGainNode: GainNode | null = null;
 let ttsGainNode: GainNode | null = null;
+let ttsSourceNode: MediaStreamAudioSourceNode | null = null;
 let controlStream: MediaStream | null = null;
 let realMicStream: MediaStream | null = null;
 
-// Outgoing WebRTC (mic → OpenAI → translated audio → Meet stream)
 let outPeerConnection: RTCPeerConnection | null = null;
 let outDataChannel: RTCDataChannel | null = null;
 let outCurrentSubtitle = "";
 let outSubtitleTimer: ReturnType<typeof setTimeout> | null = null;
+let ttsSilenceTimer: ReturnType<typeof setTimeout> | null = null;
 
 let audioGraphReady = false;
 let isActive = false;
@@ -37,10 +37,8 @@ navigator.mediaDevices.getUserMedia = async function (
     realMicStream = await origGetUserMedia(constraints);
     log("Real mic stream obtained, tracks:", realMicStream.getAudioTracks().length);
 
-    // Create AudioContext NOW — getUserMedia is called from a user gesture
     setupAudioGraph();
 
-    // Create control stream with AudioContext output + original video
     controlStream = new MediaStream();
     if (micDestination) {
       for (const t of micDestination.stream.getAudioTracks()) controlStream.addTrack(t);
@@ -77,7 +75,7 @@ function setupAudioGraph() {
       audioCtx.resume();
     }
 
-    log("Audio graph ready — audioGraphReady:", audioGraphReady);
+    log("Audio graph ready");
     postToExtension({ type: "MRT_AUDIO_GRAPH_READY" });
   } catch (err) {
     logError("Audio graph setup failed:", (err as Error).message);
@@ -106,19 +104,38 @@ async function startOutgoingTranslation(ephemeralToken: string, targetLanguage: 
     outPeerConnection.ontrack = (event) => {
       log("Translated audio received from OpenAI");
       if (!audioCtx || !ttsGainNode) return;
-      audioCtx.createMediaStreamSource(event.streams[0]).connect(ttsGainNode);
+
+      // Disconnect previous TTS source if any
+      if (ttsSourceNode) {
+        ttsSourceNode.disconnect();
+        ttsSourceNode = null;
+      }
+
+      ttsSourceNode = audioCtx.createMediaStreamSource(event.streams[0]);
+      ttsSourceNode.connect(ttsGainNode);
+
+      // Duck real mic when translation plays
       if (micGainNode) micGainNode.gain.value = 0.2;
       if (ttsGainNode) ttsGainNode.gain.value = 1.0;
+
+      // Fix #6: Restore mic volume after translation audio stops
+      // Monitor the remote track for silence/end
+      const remoteTrack = event.track;
+      remoteTrack.onended = () => {
+        log("Translation audio track ended — restoring mic volume");
+        restoreMicVolume();
+      };
     };
 
     outPeerConnection.onconnectionstatechange = () => {
-      log("PC state:", outPeerConnection?.connectionState);
-      if (outPeerConnection?.connectionState === "failed") {
-        postToExtension({ type: "MRT_OUTGOING_STATUS", status: "error", error: "Connection failed" });
+      const state = outPeerConnection?.connectionState;
+      log("PC state:", state);
+      if (state === "failed" || state === "disconnected" || state === "closed") {
+        postToExtension({ type: "MRT_OUTGOING_STATUS", status: "error", error: `Connection ${state}` });
+        restoreMicVolume();
       }
     };
 
-    // Data channel for transcript events
     outDataChannel = outPeerConnection.createDataChannel("oai-events");
     outDataChannel.onopen = () => {
       log("Data channel OPEN — translation active");
@@ -126,8 +143,7 @@ async function startOutgoingTranslation(ephemeralToken: string, targetLanguage: 
     };
     outDataChannel.onclose = () => {
       log("Data channel closed");
-      if (micGainNode) micGainNode.gain.value = 1.0;
-      if (ttsGainNode) ttsGainNode.gain.value = 0.0;
+      restoreMicVolume();
       postToExtension({ type: "MRT_OUTGOING_STATUS", status: "disconnected" });
     };
     outDataChannel.onerror = (e) => logError("DC error:", e);
@@ -135,7 +151,6 @@ async function startOutgoingTranslation(ephemeralToken: string, targetLanguage: 
       try { handleOutgoingEvent(JSON.parse(ev.data)); } catch { /* ignore */ }
     };
 
-    // Create SDP offer — send to content script for routing through background
     const offer = await outPeerConnection.createOffer();
     await outPeerConnection.setLocalDescription(offer);
     log("SDP offer created — sending via content script to background");
@@ -145,7 +160,6 @@ async function startOutgoingTranslation(ephemeralToken: string, targetLanguage: 
       offerSdp: offer.sdp,
       ephemeralToken,
     });
-    // Answer will arrive via MRT_SDP_ANSWER message
   } catch (err) {
     const msg = (err as Error).message;
     logError("Outgoing setup error:", msg);
@@ -153,7 +167,12 @@ async function startOutgoingTranslation(ephemeralToken: string, targetLanguage: 
   }
 }
 
-// Called when background returns the SDP answer
+function restoreMicVolume() {
+  if (micGainNode) micGainNode.gain.value = 1.0;
+  if (ttsGainNode) ttsGainNode.gain.value = 0.0;
+  if (ttsSilenceTimer) { clearTimeout(ttsSilenceTimer); ttsSilenceTimer = null; }
+}
+
 async function handleSdpAnswer(answerSdp: string) {
   try {
     if (!outPeerConnection) throw new Error("No PeerConnection");
@@ -189,13 +208,28 @@ function handleOutgoingEvent(data: { type: string; [key: string]: unknown }) {
 
 function stopOutgoingTranslation() {
   if (outSubtitleTimer) { clearTimeout(outSubtitleTimer); outSubtitleTimer = null; }
+  if (ttsSilenceTimer) { clearTimeout(ttsSilenceTimer); ttsSilenceTimer = null; }
   if (outDataChannel) { outDataChannel.close(); outDataChannel = null; }
   if (outPeerConnection) { outPeerConnection.close(); outPeerConnection = null; }
-  if (micGainNode) micGainNode.gain.value = 1.0;
-  if (ttsGainNode) ttsGainNode.gain.value = 0.0;
+  if (ttsSourceNode) { ttsSourceNode.disconnect(); ttsSourceNode = null; }
+  restoreMicVolume();
   outCurrentSubtitle = "";
   isActive = false;
   log("Outgoing stopped");
+}
+
+// Fix #5: Full AudioContext cleanup
+function cleanupAudioGraph() {
+  stopOutgoingTranslation();
+  if (ttsSourceNode) { ttsSourceNode.disconnect(); ttsSourceNode = null; }
+  if (ttsGainNode) { ttsGainNode.disconnect(); ttsGainNode = null; }
+  if (micGainNode) { micGainNode.disconnect(); micGainNode = null; }
+  if (micDestination) { micDestination = null; }
+  if (audioCtx) { audioCtx.close(); audioCtx = null; }
+  if (realMicStream) { realMicStream.getTracks().forEach(t => t.stop()); realMicStream = null; }
+  if (controlStream) { controlStream = null; }
+  audioGraphReady = false;
+  log("Audio graph cleaned up");
 }
 
 // ─── Communication with Content Script (ISOLATED world) ─────────────
@@ -216,6 +250,9 @@ window.addEventListener("message", (event) => {
       break;
     case "MRT_STOP_OUTGOING":
       stopOutgoingTranslation();
+      break;
+    case "MRT_CLEANUP":
+      cleanupAudioGraph();
       break;
     case "MRT_SDP_ANSWER":
       log("Received SDP answer from background");

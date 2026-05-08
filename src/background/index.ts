@@ -15,6 +15,7 @@ async function ensureOffscreenDocument(): Promise<void> {
     documentUrls: [chrome.runtime.getURL(OFFSCREEN_DOCUMENT_PATH)],
   });
   if (existing.length > 0) return;
+
   log("Creating offscreen document...");
   await chrome.offscreen.createDocument({
     url: OFFSCREEN_DOCUMENT_PATH,
@@ -151,22 +152,44 @@ async function handleMessage(message: { type: string; [key: string]: unknown }) 
       await ensureContentScript(tabId);
 
       // Get TWO ephemeral tokens — one per direction
-      const [outgoingToken, incomingToken] = await Promise.all([
-        getEphemeralToken(apiKey, partnerLanguage), // Your language → Partner's language
-        getEphemeralToken(apiKey, yourLanguage),    // Partner's language → Your language
-      ]);
+      // Fix #8: Use individual try/catch so one failure doesn't leak the other
+      let outgoingToken: string;
+      let incomingToken: string;
+      try {
+        [outgoingToken, incomingToken] = await Promise.all([
+          getEphemeralToken(apiKey, partnerLanguage),
+          getEphemeralToken(apiKey, yourLanguage),
+        ]);
+      } catch (err) {
+        broadcastStatus("error", (err as Error).message);
+        throw err;
+      }
 
       log("Both tokens obtained. Starting bidirectional translation.");
 
-      // Direction 1: Outgoing (mic → translation → Meet) via content script → inject.js
-      chrome.tabs.sendMessage(tabId, {
-        type: "START_BIDIRECTIONAL",
-        outgoingToken,
-        incomingToken,
-        yourLanguage,
-        partnerLanguage,
-        tabId,
+      // Fix #3: Await the content script's response to propagate errors
+      const result = await new Promise<unknown>((resolve) => {
+        chrome.tabs.sendMessage(tabId, {
+          type: "START_BIDIRECTIONAL",
+          outgoingToken,
+          incomingToken,
+          yourLanguage,
+          partnerLanguage,
+          tabId,
+        }, (response) => {
+          if (chrome.runtime.lastError) {
+            resolve({ error: chrome.runtime.lastError.message });
+          } else {
+            resolve(response);
+          }
+        });
       });
+
+      if (result && typeof result === "object" && "error" in (result as object)) {
+        const errMsg = (result as { error: string }).error;
+        broadcastStatus("error", errMsg);
+        throw new Error(errMsg);
+      }
 
       return { success: true };
     }
@@ -186,7 +209,7 @@ async function handleMessage(message: { type: string; [key: string]: unknown }) 
       return { status: currentStatus };
 
     case "EXCHANGE_SDP": {
-      // Relay SDP offer to OpenAI on behalf of inject.js (avoids CSP in MAIN world)
+      // Relay SDP offer to OpenAI on behalf of inject.js (avoids CSP)
       const { offerSdp, ephemeralToken } = message as unknown as {
         offerSdp: string; ephemeralToken: string;
       };
@@ -207,7 +230,6 @@ async function handleMessage(message: { type: string; [key: string]: unknown }) 
     }
 
     case "START_INCOMING_TAB": {
-      // Start tab audio → translation → local speakers (offscreen)
       const { incomingToken, yourLanguage, tabId } = message as unknown as {
         incomingToken: string; yourLanguage: string; tabId: number;
       };
@@ -217,7 +239,6 @@ async function handleMessage(message: { type: string; [key: string]: unknown }) 
       const streamId = await getTabStreamId(tabId);
       const result = await sendToOffscreen({
         type: "START_WEBRTC", streamId, ephemeralToken: incomingToken,
-        targetLanguage: yourLanguage, audioSource: "tab",
       });
       if (result && typeof result === "object" && "error" in (result as object)) {
         throw new Error((result as { error: string }).error);

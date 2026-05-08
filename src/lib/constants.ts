@@ -32,7 +32,6 @@ export const DEFAULT_SETTINGS = {
   partnerLanguage: "en",
   outputVolume: 0.75,
   isEnabled: false,
-  audioSource: "mic",
 } as const;
 
 export const OFFSCREEN_DOCUMENT_PATH = "offscreen.html";

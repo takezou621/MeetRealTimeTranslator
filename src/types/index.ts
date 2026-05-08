@@ -4,10 +4,7 @@ export interface ExtensionSettings {
   partnerLanguage: string;
   outputVolume: number;
   isEnabled: boolean;
-  audioSource: AudioSource;
 }
-
-export type AudioSource = "tab" | "mic";
 
 export type TranslationStatus =
   | "idle"
