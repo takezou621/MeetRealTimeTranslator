@@ -125,7 +125,24 @@ async function startWebRTC(
 
     const offer = await peerConnection.createOffer();
     await peerConnection.setLocalDescription(offer);
-    log("SDP offer created, sending to OpenAI...");
+
+    // Wait for ICE gathering to complete
+    if (peerConnection.iceGatheringState !== "complete") {
+      log("Waiting for ICE gathering...");
+      await new Promise<void>((resolve) => {
+        const timeout = setTimeout(() => { log("ICE gathering timeout"); resolve(); }, 3000);
+        peerConnection!.onicegatheringstatechange = () => {
+          if (peerConnection?.iceGatheringState === "complete") {
+            clearTimeout(timeout);
+            log("ICE gathering complete");
+            resolve();
+          }
+        };
+      });
+    }
+
+    const sdpWithCandidates = peerConnection.localDescription?.sdp ?? offer.sdp;
+    log("SDP offer ready, sending to OpenAI...");
 
     const sdpResponse = await fetch(`${OPENAI_API_BASE}/calls`, {
       method: "POST",
@@ -133,7 +150,7 @@ async function startWebRTC(
         Authorization: `Bearer ${ephemeralToken}`,
         "Content-Type": "application/sdp",
       },
-      body: offer.sdp,
+      body: sdpWithCandidates,
     });
 
     if (!sdpResponse.ok) {

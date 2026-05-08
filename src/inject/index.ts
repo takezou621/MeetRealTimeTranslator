@@ -153,11 +153,29 @@ async function startOutgoingTranslation(ephemeralToken: string, targetLanguage: 
 
     const offer = await outPeerConnection.createOffer();
     await outPeerConnection.setLocalDescription(offer);
-    log("SDP offer created — sending via content script to background");
+
+    // Wait for ICE gathering to complete (ensures candidates are in SDP)
+    if (outPeerConnection.iceGatheringState !== "complete") {
+      log("Waiting for ICE gathering...");
+      await new Promise<void>((resolve) => {
+        const timeout = setTimeout(() => { log("ICE gathering timeout, sending anyway"); resolve(); }, 3000);
+        outPeerConnection!.onicegatheringstatechange = () => {
+          if (outPeerConnection?.iceGatheringState === "complete") {
+            clearTimeout(timeout);
+            log("ICE gathering complete");
+            resolve();
+          }
+        };
+      });
+    }
+
+    // Use localDescription.sdp (includes gathered ICE candidates)
+    const sdpWithCandidates = outPeerConnection.localDescription?.sdp ?? offer.sdp;
+    log("SDP offer ready, sending via content script to background");
 
     postToExtension({
       type: "MRT_SDP_OFFER",
-      offerSdp: offer.sdp,
+      offerSdp: sdpWithCandidates,
       ephemeralToken,
     });
   } catch (err) {
@@ -255,8 +273,16 @@ window.addEventListener("message", (event) => {
       cleanupAudioGraph();
       break;
     case "MRT_SDP_ANSWER":
-      log("Received SDP answer from background");
-      handleSdpAnswer(data.answerSdp as string);
+      if (data.error) {
+        logError("SDP exchange error:", data.error);
+        postToExtension({ type: "MRT_OUTGOING_STATUS", status: "error", error: `SDP: ${data.error}` });
+      } else if (data.answerSdp) {
+        log("Received SDP answer from background, length:", (data.answerSdp as string).length);
+        handleSdpAnswer(data.answerSdp as string);
+      } else {
+        logError("SDP response missing both answer and error");
+        postToExtension({ type: "MRT_OUTGOING_STATUS", status: "error", error: "Empty SDP response" });
+      }
       break;
     case "MRT_SETUP_AUDIO_GRAPH":
       setupAudioGraph();
