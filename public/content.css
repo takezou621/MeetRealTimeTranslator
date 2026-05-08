@@ -1,0 +1,103 @@
+/* MeetRealTimeTranslator — Subtitle Overlay Styles */
+/* All selectors use mrt- prefix to avoid conflicts with Google Meet */
+
+.mrt-overlay {
+  position: fixed;
+  bottom: 100px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 99999;
+  min-width: 320px;
+  max-width: 680px;
+  background: rgba(0, 0, 0, 0.78);
+  border: 1px solid rgba(99, 102, 241, 0.5);
+  border-radius: 12px;
+  padding: 0;
+  cursor: grab;
+  user-select: none;
+  backdrop-filter: blur(12px);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+  font-family: 'Google Sans', 'Segoe UI', Roboto, sans-serif;
+  transition: box-shadow 0.2s ease;
+}
+
+.mrt-overlay:hover {
+  box-shadow: 0 8px 40px rgba(99, 102, 241, 0.25);
+}
+
+.mrt-overlay-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 14px;
+  font-size: 11px;
+  font-weight: 500;
+  color: rgba(165, 180, 252, 0.85);
+  letter-spacing: 0.5px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  background: rgba(99, 102, 241, 0.12);
+  border-radius: 12px 12px 0 0;
+}
+
+.mrt-overlay-header::before {
+  content: '';
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #6366f1;
+  box-shadow: 0 0 6px rgba(99, 102, 241, 0.6);
+}
+
+.mrt-overlay-header.mrt-connected::before {
+  background: #34d399;
+  box-shadow: 0 0 6px rgba(52, 211, 153, 0.6);
+  animation: mrt-pulse 2s ease-in-out infinite;
+}
+
+.mrt-overlay-header.mrt-error::before {
+  background: #f87171;
+  box-shadow: 0 0 6px rgba(248, 113, 113, 0.6);
+}
+
+.mrt-subtitle-text {
+  padding: 12px 16px;
+  font-size: 16px;
+  line-height: 1.6;
+  color: #f1f5f9;
+  max-height: 120px;
+  overflow-y: auto;
+  word-wrap: break-word;
+}
+
+.mrt-subtitle-text.mrt-empty {
+  color: rgba(148, 163, 184, 0.6);
+  font-style: italic;
+  font-size: 13px;
+}
+
+.mrt-fade-in {
+  animation: mrt-fadeIn 0.25s ease-out;
+}
+
+@keyframes mrt-fadeIn {
+  from { opacity: 0.4; transform: translateY(2px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes mrt-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
+/* Scrollbar styling */
+.mrt-subtitle-text::-webkit-scrollbar {
+  width: 4px;
+}
+.mrt-subtitle-text::-webkit-scrollbar-track {
+  background: transparent;
+}
+.mrt-subtitle-text::-webkit-scrollbar-thumb {
+  background: rgba(99, 102, 241, 0.3);
+  border-radius: 2px;
+}
